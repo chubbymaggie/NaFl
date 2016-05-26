@@ -7,7 +7,6 @@ import sys
 import mmap
 import subprocess
 from array import array
-from ConfigParser import SafeConfigParser
 import logging
 import logging.handlers
 
@@ -19,6 +18,7 @@ except:
 
 from helpers import utils
 from helpers import fileops
+from helpers.config import nConfig
 from helpers.mutator import myFileGenerator
 from helpers.queue import mutationQueue, FileToMutate
 from helpers.crash_analysis import analyze_crash
@@ -32,12 +32,9 @@ shm = None
 shm_size = 0
 history_bitmap = None
 
-# Configuration file stuff
-cfg = SafeConfigParser()
-cfg.read('config.ini')
-
+myConfig = nConfig()
 cmd_l = []
-ml = None   # main logger
+ml = None  # main logger
 
 
 def initialize_logging():
@@ -54,7 +51,7 @@ def initialize_logging():
         LOG_FILENAME,
         maxBytes = 1024 * 1024,
         backupCount = 1
-        )
+    )
 
     main_logger.addHandler(handler)
 
@@ -70,15 +67,17 @@ def parse_config_file():
     global DEBUG
 
     # TODO: later this will be a GUI
-    cmd_l.append(cfg.get('pin_info', 'pin_bat'))
+    cmd_l.append(myConfig.cfg.get('pin_info', 'pin_bat'))
     cmd_l.append('-t')
-    cmd_l.append(cfg.get('pin_info', 'pintool'))
+    cmd_l.append(myConfig.cfg.get('pin_info', 'pintool'))
     cmd_l.append('-timer')
-    cmd_l.append(cfg.get('pin_info', 'timeout'))
+    cmd_l.append(myConfig.cfg.get('pin_info', 'timeout'))
+    cmd_l.append('-module')
+    cmd_l.append(myConfig.cfg.get('target_info', 'module').lower())
     cmd_l.append('--')
-    cmd_l.append(cfg.get('target_info', 'filename'))
+    cmd_l.append(myConfig.cfg.get('target_info', 'filename'))
 
-    DEBUG = cfg.getboolean('runtime', 'debug')
+    DEBUG = myConfig.cfg.getboolean('runtime', 'debug')
 
 
 def is_interesting_input(curr_bitmap):
@@ -92,7 +91,7 @@ def is_interesting_input(curr_bitmap):
     global history_bitmap
 
     if curr_bitmap[0] == 0x41414141 \
-    and curr_bitmap[1] == 0x42424242:
+            and curr_bitmap[1] == 0x42424242:
         # Crash!
         # TODO: move this to a parallel communication channel :)
         # Restore these first bytes to more appropriate values
@@ -144,7 +143,7 @@ def fuzzing_loop():
     This loops (maybe indefinitely) creating several
     fuzzing processes
     """
-    id = 0
+    m_id = 0
 
     # Instantiate without params to deactivate debugging
     filegen = myFileGenerator(debug = DEBUG)
@@ -153,10 +152,10 @@ def fuzzing_loop():
     ml.info("[*] Initializing queue...")
 
     for s in fileops.get_all_filenames(filegen.mutations_dir):
-        mutationQueue.put(FileToMutate(0, s, id, None))
-        id += 1
+        mutationQueue.put(FileToMutate(0, s, m_id, None))
+        m_id += 1
 
-    ml.info("[*] Queue initialized with %d files" % id)
+    ml.info("[*] Queue initialized with %d files" % m_id)
     ml.info("[*] Starting fuzzing process...")
 
     while True:
@@ -166,11 +165,11 @@ def fuzzing_loop():
         # * instrumented process crashes
         # * timeout expires (implemented in PinTool)
 
-        id += 1
+        m_id += 1
 
         # This generates the mutations and
         # it writes the current test file
-        mutation_filename = filegen.write_test_case(id)
+        mutation_filename = filegen.write_test_case()
 
         if mutation_filename:
             mutation_bitmap = run_under_pin(mutation_filename)
@@ -186,18 +185,18 @@ def fuzzing_loop():
             filegen.delete_current_test_case()
 
         elif interesting == 1:
-            # ml.info("*** id: %d: Interesting file. Caused a whole new path. ***" % id)
-            mutationQueue.put(FileToMutate(1, mutation_filename, id, mutation_bitmap))
+            # ml.info("*** id: %d: Interesting file. Caused a whole new path. ***" % m_id)
+            mutationQueue.put(FileToMutate(1, mutation_filename, m_id, mutation_bitmap))
 
         elif interesting == 2:
-            # ml.info("*** id: %d: The hit count moved to another bin. ***" % id)
-            mutationQueue.put(FileToMutate(2, mutation_filename, id, mutation_bitmap))
+            # ml.info("*** id: %d: The hit count moved to another bin. ***" % m_id)
+            mutationQueue.put(FileToMutate(2, mutation_filename, m_id, mutation_bitmap))
 
         elif interesting == 3:
             ml.info('**** CRASH ****' * 4)
             ml.info(mutation_filename)
 
-            cmd = [cfg.get('target_info', 'filename'), mutation_filename]
+            cmd = [myConfig.cfg.get('target_info', 'filename'), mutation_filename]
             # Analyzes the crash (and saves it, if determined interesting)
             analyze_crash(cmd)
 
@@ -225,13 +224,13 @@ def main():
 
     if not history_bitmap:
         ml.info("[x] Failed to restore saved bitmap! Starting from scratch.")
-        history_bitmap = array('L', [0 for x in xrange(bitmap_size)])
+        history_bitmap = array('L', [0] * bitmap_size)
 
     shm = mmap.mmap(0,
-            shm_size,
-            shm_name,
-            access = mmap.ACCESS_WRITE
-        )
+                    shm_size,
+                    shm_name,
+                    access = mmap.ACCESS_WRITE
+                    )
 
     if not shm:
         # Oops!
@@ -242,7 +241,7 @@ def main():
     # Some logging :)
     ml.info("")
     ml.info("=" * 80)
-    ml.info("Started fuzzing: %s" % cfg.get('target_info', 'filename'))
+    ml.info("Started fuzzing: %s" % myConfig.cfg.get('target_info', 'filename'))
     ml.info("=" * 80)
 
     try:
@@ -261,7 +260,6 @@ def main():
             pickle.dump(history_bitmap, fp)
 
         sys.exit(1)
-
 
 
 if __name__ == '__main__':
